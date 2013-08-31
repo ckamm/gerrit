@@ -108,7 +108,7 @@ public class PatchListEntry {
     deletions = del;
   }
 
-  private PatchListEntry(final ChangeType changeType,
+  public PatchListEntry(final ChangeType changeType,
       final PatchType patchType, final String oldName, final String newName,
       final byte[] header, final List<Edit> edits, final int insertions,
       final int deletions) {
@@ -164,6 +164,10 @@ public class PatchListEntry {
 
   public int getDeletions() {
     return deletions;
+  }
+
+  public byte[] getHeader() {
+    return header;
   }
 
   public List<String> getHeaderLines() {

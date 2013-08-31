@@ -18,6 +18,7 @@ package com.google.gerrit.server.patch;
 import com.google.common.cache.CacheLoader;
 import com.google.gerrit.reviewdb.client.AccountDiffPreference.Whitespace;
 import com.google.gerrit.reviewdb.client.Patch;
+import com.google.gerrit.reviewdb.client.Patch.ChangeType;
 import com.google.gerrit.server.git.GitRepositoryManager;
 import com.google.inject.Inject;
 
@@ -61,6 +62,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -77,11 +79,182 @@ public class PatchListLoader extends CacheLoader<PatchListKey, PatchList> {
   @Override
   public PatchList load(final PatchListKey key) throws Exception {
     final Repository repo = repoManager.openRepository(key.projectKey);
+    final ObjectId aId = key.getOldId();
+    final ObjectId bId = key.getNewId();
+    final Whitespace whitespace = key.getWhitespace();
+
     try {
-      return readPatchList(key, repo);
+      if (aId == null) {
+        // Patches against base just use the plain diff
+        return readPatchList(key, repo);
+      } else {
+        // When diffing two patch sets their base commit can differ. Then
+        // the simple diff includes the - usually unrelated - changes between the
+        // bases.
+        // To remove these changes, we generate diffs between the patch sets (a2b),
+        // the bases (aBase2bBase) as well as the patch sets and their bases
+        // (aBase2a, bBase2b) and compute the interesting part of the a2b diff.
+        final PatchList a2b = readPatchList(
+            new PatchListKey(key.projectKey, aId, bId, whitespace), repo);
+        final PatchList aBase2a = readPatchList(
+            new PatchListKey(key.projectKey, null, aId, whitespace), repo);
+        final PatchList bBase2b = readPatchList(
+            new PatchListKey(key.projectKey, null, bId, whitespace), repo);
+        final PatchList aBase2bBase = readPatchList(
+            new PatchListKey(key.projectKey, aBase2a.getOldId(), bBase2b.getOldId(), whitespace), repo);
+        
+        return interdiff(a2b, aBase2bBase, aBase2a, bBase2b);
+      }
     } finally {
       repo.close();
     }
+  }
+
+  // Takes the a2b patch list and removes the changes in aBase2bBase from it.
+  // To do that, it needs the aBase2a and bBase2b patch lists.
+  private PatchList interdiff(
+      final PatchList a2b,
+      final PatchList aBase2bBase,
+      final PatchList aBase2a,
+      final PatchList bBase2b) {
+
+    ArrayList<PatchListEntry> newPatches = new ArrayList<PatchListEntry>();
+
+    // TODO: maps for fast access?
+
+    for (PatchListEntry a2bPatch : a2b.getPatches()) {
+      // the expected file name in aBase2a
+      String expectedName = a2bPatch.getOldName() != null ? a2bPatch.getOldName()
+                                                          : a2bPatch.getNewName();
+    
+      // find the cross patches, if any
+      List<Edit> aEdits = new EditList();
+      for (PatchListEntry p : aBase2a.getPatches()) {
+        if (p.getNewName().equals(expectedName)) {
+          aEdits = p.getEdits();
+          break;
+        }
+      }
+
+      // the expected file name in aBase2bBase (in bBase2b it's always a2b.newName)
+      expectedName = a2bPatch.getNewName();
+      List<Edit> bEdits = new EditList();
+      for (PatchListEntry p : bBase2b.getPatches()) {
+        if (p.getNewName().equals(a2bPatch.getNewName())) {
+          bEdits = p.getEdits();
+          expectedName = p.getOldName() != null ? p.getOldName() : p.getNewName();
+          break;
+        }
+      }
+
+      // Find the coresponding old base patch
+      PatchListEntry basePatch = null;
+      for (PatchListEntry p : aBase2bBase.getPatches()) {
+        if (p.getNewName().equals(expectedName)) {
+          basePatch = p;
+          break;
+        }
+      }
+
+      // Optimization for a very common case
+      if (basePatch == null) {
+        newPatches.add(a2bPatch);
+        continue;
+      }
+      
+      // Walk the newEdits and decide whether to keep them or not
+      final List<Edit> baseEdits = basePatch.getEdits();
+      final List<Edit> newEdits = a2bPatch.getEdits();
+      EditList keptNewEdits = new EditList();
+
+      // Indexes into aEdits, bEdits, baseEdits
+      int aIndex = 0;
+      int bIndex = 0;
+      int baseIndex = 0;
+
+      // Offsets between newEdits and baseEdits introduced by aEdits, bEdits.
+      int aOffset = 0;
+      int bOffset = 0;
+
+      // Insert/delete counters.
+      int inserts = 0;
+      int deletes = 0;
+      
+      for (Edit newEdit : newEdits) {
+        // 1. update offsets for a, b for all edits before newEdit
+        // 2. if any aEdit or bEdit conflicts newEdit, keep newEdit
+        // 3. if there's no identical baseEdit, keep newEdit
+        // 4. otherwise newEdit can be dropped
+
+        boolean conflictingEdit = false;
+
+        // Handle relevant edits on A
+        while (aIndex < aEdits.size()) {
+          final Edit aEdit = aEdits.get(aIndex);
+
+          if (aEdit.getEndB() <= newEdit.getBeginA()) {
+            // Eat earlier, non-conflicting edits
+            aOffset += aEdit.getLengthB() - aEdit.getLengthA();
+            aIndex++;
+          } else if (aEdit.getBeginB() >= newEdit.getEndA()) {
+            // No relevant edits left
+            break;
+          } else {
+            conflictingEdit = true;
+            break;
+          }
+        }
+
+        // Handle relevant edits on B
+        while (!conflictingEdit && bIndex < bEdits.size()) {
+          final Edit bEdit = bEdits.get(bIndex);
+
+          if (bEdit.getEndB() <= newEdit.getBeginB()) {
+            // Eat earlier, non-conflicting edits
+            bOffset += bEdit.getLengthB() - bEdit.getLengthA();
+            bIndex++;
+          } else if (bEdit.getBeginB() >= newEdit.getEndB()) {
+            // No relevant edits left
+            break;
+          } else {
+            conflictingEdit = true;
+            break;
+          }
+        }
+
+        // Check for identical edit in baseEdits
+        boolean identicalBaseEdit = false;
+        while (!conflictingEdit && baseIndex < baseEdits.size()) {
+          final Edit baseEdit = baseEdits.get(baseIndex);
+          if (baseEdit.getBeginA() + aOffset > newEdit.getBeginA())
+            break;
+
+          if (baseEdit.getBeginA() + aOffset == newEdit.getBeginA() &&
+              baseEdit.getBeginB() + bOffset == newEdit.getBeginB() &&
+              baseEdit.getLengthA() == newEdit.getLengthA() &&
+              baseEdit.getLengthB() == newEdit.getLengthB()) {
+            identicalBaseEdit = true;
+          }
+
+          baseIndex++;
+        }
+
+        if (!identicalBaseEdit) {
+            keptNewEdits.add(newEdit);
+            inserts += newEdit.getLengthB();
+            deletes += newEdit.getLengthA();
+        }
+      }
+
+      if (!keptNewEdits.isEmpty()) {
+        newPatches.add(new PatchListEntry(a2bPatch.getChangeType(),
+            a2bPatch.getPatchType(), a2bPatch.getOldName(), a2bPatch.getNewName(),
+            a2bPatch.getHeader(), keptNewEdits, inserts, deletes));
+      }
+    }
+
+    return new PatchList(aBase2a.getNewId(), a2b.getNewId(), false,
+                         newPatches.toArray(new PatchListEntry[newPatches.size()]));
   }
 
   private static RawTextComparator comparatorFor(Whitespace ws) {
