@@ -148,11 +148,11 @@ public class EditList {
     }
 
     public boolean isDeletedA() {
-      return curEdit.getBeginA() <= aCur && aCur < curEdit.getEndA();
+      return aCur < aEnd && (bCur >= bSize || curEdit.getBeginA() <= aCur && aCur < curEdit.getEndA());
     }
 
     public boolean isInsertedB() {
-      return curEdit.getBeginB() <= bCur && bCur < curEdit.getEndB();
+      return bCur < bEnd && (aCur >= aSize || curEdit.getBeginB() <= bCur && bCur < curEdit.getEndB());
     }
 
     public boolean isModifiedLine() {
