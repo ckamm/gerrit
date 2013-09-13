@@ -108,7 +108,6 @@ public class SideBySideTable extends AbstractPatchContentTable {
       if (hasDifferences(script)) {
         int lastA = 0;
         int lastB = 0;
-        final boolean ignoreWS = script.isIgnoreWhitespace();
         a = getSparseHtmlFileA(script);
         b = getSparseHtmlFileB(script);
         final boolean intraline =
@@ -126,7 +125,7 @@ public class SideBySideTable extends AbstractPatchContentTable {
               final SafeHtml ctx = a.getSafeHtmlLine(hunk.getCurA());
               appendLineNumber(nc, hunk.getCurA(), false);
               appendLineText(nc, CONTEXT, ctx, false, false);
-              if (ignoreWS && b.contains(hunk.getCurB())) {
+              if (b.contains(hunk.getCurB())) {
                 appendLineText(nc, CONTEXT, b, hunk.getCurB(), false);
               } else {
                 appendLineText(nc, CONTEXT, ctx, false, false);
