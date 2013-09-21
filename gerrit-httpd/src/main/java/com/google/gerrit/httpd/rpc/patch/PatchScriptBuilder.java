@@ -383,7 +383,8 @@ class PatchScriptBuilder {
           final String lineA = a.src.getString(hunk.getCurA());
           a.dst.addLine(hunk.getCurA(), lineA);
 
-          if (ignoredWhitespace) {
+          // Always include a and b lines, if they differ!
+          if (true || ignoredWhitespace) {
             // If we ignored whitespace in some form, also get the line
             // from b when it does not exactly match the line from a.
             //
